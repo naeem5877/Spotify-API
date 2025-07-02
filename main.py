@@ -37,8 +37,8 @@ else:
     app.logger.setLevel(logging.INFO)
 
 # --- Spotify API Configuration ---
-SPOTIFY_CLIENT_ID = '8c4adcd1cebc42eda32054be38a2501f'
-SPOTIFY_CLIENT_SECRET = 'de62ea9158714e1ba0c80fd325d21758'
+SPOTIFY_CLIENT_ID = os.environ.get('SPOTIFY_CLIENT_ID', '8c4adcd1cebc42eda32054be38a2501f')
+SPOTIFY_CLIENT_SECRET = os.environ.get('SPOTIFY_CLIENT_SECRET', 'de62ea9158714e1ba0c80fd325d21758')
 
 # --- Initialize Spotify Client with retry logic ---
 def initialize_spotify_client():
@@ -68,25 +68,26 @@ sp = initialize_spotify_client()
 
 class SpotifyDownloader:
     def __init__(self):
-        # Enhanced yt-dlp options for better reliability
+        # Enhanced yt-dlp options for better reliability on Render
         self.ydl_opts = {
             'format': 'bestaudio[ext=m4a]/bestaudio/best',
             'noplaylist': True,
-            'quiet': False,  # Enable some logging for debugging
+            'quiet': False,
             'no_warnings': False,
             'extractaudio': True,
             'audioformat': 'mp3',
             'postprocessors': [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'mp3',
-                'preferredquality': '320'
+                'preferredquality': '192'  # Reduced quality for faster processing on free tier
             }],
-            'socket_timeout': 30,
-            'retries': 3,
-            'fragment_retries': 3,
+            'socket_timeout': 20,  # Reduced timeout for free tier
+            'retries': 2,  # Reduced retries
+            'fragment_retries': 2,
             'ignoreerrors': False,
             'cookiefile': None,
-            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'max_filesize': 50 * 1024 * 1024,  # 50MB limit for free tier
         }
         self.lock = threading.Lock()
 
@@ -107,12 +108,12 @@ class SpotifyDownloader:
             app.logger.error(f"Error detecting Spotify link: {e}")
             return None
 
-    def download_image(self, image_url, max_retries=3):
+    def download_image(self, image_url, max_retries=2):
         for attempt in range(max_retries):
             try:
                 response = requests.get(
                     image_url, 
-                    timeout=15,
+                    timeout=10,
                     headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
                 )
                 response.raise_for_status()
@@ -124,15 +125,13 @@ class SpotifyDownloader:
         return None
 
     def add_metadata_to_file(self, file_path, metadata):
-        max_retries = 3
+        max_retries = 2
         for attempt in range(max_retries):
             try:
-                # Ensure file exists and is accessible
                 if not os.path.exists(file_path):
                     app.logger.error(f"File does not exist: {file_path}")
                     return False
 
-                # Wait a bit for file to be fully written
                 time.sleep(0.5)
 
                 try:
@@ -172,21 +171,19 @@ class SpotifyDownloader:
 
         return False
 
-    def search_and_download_youtube(self, query, metadata, output_dir, max_retries=3):
+    def search_and_download_youtube(self, query, metadata, output_dir, max_retries=2):
         for attempt in range(max_retries):
             try:
                 app.logger.info(f"Attempting download for query: {query} (attempt {attempt + 1})")
 
                 ydl_opts = self.ydl_opts.copy()
 
-                # Create safe filename
                 branded_title = f"{BRANDING_PREFIX}{metadata['artist']} - {metadata['title']}"
                 safe_filename = re.sub(r'[<>:"/\\|?*]', '_', branded_title)
-                safe_filename = safe_filename[:200]  # Limit filename length
+                safe_filename = safe_filename[:150]  # Shorter for free tier
 
                 ydl_opts['outtmpl'] = os.path.join(output_dir, f"{safe_filename}.%(ext)s")
 
-                # Use thread lock for yt-dlp operations
                 with self.lock:
                     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                         try:
@@ -197,29 +194,24 @@ class SpotifyDownloader:
                             app.logger.error(f"yt-dlp download error: {download_error}")
                             raise
 
-                # Find the downloaded file
                 expected_file = os.path.join(output_dir, f"{safe_filename}.mp3")
 
-                # Look for any mp3 file in the directory if exact match not found
                 if not os.path.exists(expected_file):
                     mp3_files = [f for f in os.listdir(output_dir) if f.endswith('.mp3')]
                     if mp3_files:
-                        # Use the most recently created mp3 file
                         newest_file = max(mp3_files, key=lambda x: os.path.getctime(os.path.join(output_dir, x)))
                         expected_file = os.path.join(output_dir, newest_file)
                         app.logger.info(f"Using file: {expected_file}")
 
                 if os.path.exists(expected_file):
-                    # Add metadata
                     if self.add_metadata_to_file(expected_file, metadata):
                         app.logger.info(f"Successfully downloaded and processed: {expected_file}")
                         return expected_file
                     else:
                         app.logger.warning(f"Downloaded file but failed to add metadata: {expected_file}")
-                        return expected_file  # Return file even if metadata failed
+                        return expected_file
                 else:
                     app.logger.error(f"Downloaded file not found: {expected_file}")
-                    # List all files in directory for debugging
                     try:
                         files_in_dir = os.listdir(output_dir)
                         app.logger.info(f"Files in output directory: {files_in_dir}")
@@ -229,7 +221,7 @@ class SpotifyDownloader:
             except Exception as e:
                 app.logger.error(f"YouTube download failed for '{query}' (attempt {attempt + 1}): {e}")
                 if attempt < max_retries - 1:
-                    time.sleep(2 ** attempt)  # Exponential backoff
+                    time.sleep(2 ** attempt)
 
         app.logger.error(f"All download attempts failed for: {query}")
         return None
@@ -250,7 +242,7 @@ class SpotifyDownloader:
 
         return metadata
 
-    def get_track_info(self, track_id, max_retries=3):
+    def get_track_info(self, track_id, max_retries=2):
         if not sp:
             return None
 
@@ -272,7 +264,7 @@ class SpotifyDownloader:
                     time.sleep(1)
         return None
 
-    def get_album_info(self, album_id, max_retries=3):
+    def get_album_info(self, album_id, max_retries=2):
         if not sp:
             return None
 
@@ -301,7 +293,7 @@ class SpotifyDownloader:
                     time.sleep(1)
         return None
 
-    def get_playlist_info(self, playlist_id, max_retries=3):
+    def get_playlist_info(self, playlist_id, max_retries=2):
         if not sp:
             return None
 
@@ -337,7 +329,7 @@ downloader = SpotifyDownloader()
 def home():
     return jsonify({
         'message': 'VibeDownloader.me API',
-        'version': '1.1 Production Enhanced',
+        'version': '1.1 Render Enhanced',
         'status': 'operational'
     })
 
@@ -386,11 +378,14 @@ def download():
             if not item_info:
                 return jsonify({'error': f'{content_type.capitalize()} not found'}), 404
 
+            # Limit tracks for free tier
+            tracks = item_info.get('tracks', [])[:20]  # Limit to 20 tracks for free tier
+            
             response_data = {
                 'type': content_type,
                 'title': item_info.get('name'),
                 'thumbnail_url': item_info['images'][0]['url'] if item_info.get('images') else None,
-                'total_tracks': len(item_info.get('tracks', [])),
+                'total_tracks': len(tracks),
                 'zip_download_link': f"{base_url}{url_for('download_zip', item_type=content_type, item_id=spotify_id)}"
             }
 
@@ -403,7 +398,7 @@ def download():
                 'artists': track.get('artists'),
                 'album_name': track.get('album'),
                 'download_link': f"{base_url}{url_for('stream_file', track_id=track['id'])}"
-            } for i, track in enumerate(item_info.get('tracks', []))]
+            } for i, track in enumerate(tracks)]
 
             response_data['tracks'] = tracks_list
             return jsonify(response_data)
@@ -438,7 +433,6 @@ def stream_file(track_id):
                 shutil.rmtree(temp_dir, ignore_errors=True)
             return jsonify({'error': 'Could not process track'}), 500
 
-        # Create safe filename for download
         filename = f"{BRANDING_PREFIX}{metadata['artist']} - {metadata['title']}.mp3"
         filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
 
@@ -476,6 +470,9 @@ def download_zip(item_type, item_id):
     if not item_info:
         return jsonify({'error': f'{item_type.capitalize()} not found.'}), 404
 
+    # Limit tracks for free tier
+    tracks = item_info.get('tracks', [])[:10]  # Limit to 10 tracks for ZIP on free tier
+    
     zip_temp_dir = None
     zip_path = None
 
@@ -493,11 +490,11 @@ def download_zip(item_type, item_id):
                 app.logger.error(f"Error downloading track {track.get('name', 'unknown')}: {e}")
                 return f"Error: {track.get('name', 'unknown')}"
 
-        # Download tracks with controlled concurrency
-        with ThreadPoolExecutor(max_workers=3) as executor:  # Reduced workers for stability
+        # Download tracks with limited concurrency for free tier
+        with ThreadPoolExecutor(max_workers=2) as executor:
             future_to_track = {
                 executor.submit(download_track_for_zip, track): track 
-                for track in item_info['tracks']
+                for track in tracks
             }
 
             results = []
@@ -506,10 +503,9 @@ def download_zip(item_type, item_id):
                 results.append(result)
                 app.logger.info(result)
 
-        # Create ZIP file
         zip_filename_base = f"{BRANDING_PREFIX}{item_info['name']}"
         safe_zip_base = re.sub(r'[<>:"/\\|?*]', '_', zip_filename_base)
-        safe_zip_base = safe_zip_base[:200]  # Limit filename length
+        safe_zip_base = safe_zip_base[:150]
 
         zip_path = shutil.make_archive(
             os.path.join(tempfile.gettempdir(), safe_zip_base),
@@ -542,7 +538,6 @@ def download_zip(item_type, item_id):
     except Exception as e:
         app.logger.error(f"Error creating ZIP for {item_id}: {e}", exc_info=True)
 
-        # Cleanup on error
         if zip_temp_dir and os.path.exists(zip_temp_dir):
             shutil.rmtree(zip_temp_dir, ignore_errors=True)
         if zip_path and os.path.exists(zip_path):
@@ -560,7 +555,7 @@ def internal_error(error):
     app.logger.error(f"Internal server error: {error}")
     return jsonify({'error': 'Internal server error'}), 500
 
-# --- Main execution for development only ---
+# --- Main execution ---
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
+    port = int(os.environ.get('PORT', 10000))
     app.run(debug=False, host='0.0.0.0', port=port)
