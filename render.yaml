@@ -3,7 +3,7 @@ services:
     name: spotify-downloader-api
     env: python
     buildCommand: "pip install -r requirements.txt"
-    startCommand: "gunicorn app:app"
+    startCommand: "gunicorn --bind 0.0.0.0:$PORT app:app"
     plan: free
     healthCheckPath: /health
     envVars:
@@ -13,5 +13,3 @@ services:
         sync: false
       - key: PYTHONUNBUFFERED
         value: "1"
-      - key: PORT
-        value: "10000"
