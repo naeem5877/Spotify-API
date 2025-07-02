@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: vibedownloader
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn --bind 0.0.0.0:$PORT --workers 2 --timeout 120 app:app
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: SPOTIFY_CLIENT_ID
+        value: 8c4adcd1cebc42eda32054be38a2501f
+      - key: SPOTIFY_CLIENT_SECRET
+        value: de62ea9158714e1ba0c80fd325d21758
