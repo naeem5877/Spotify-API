@@ -1,4 +1,4 @@
-# --- Enhanced Spotify Downloader API with YouTube Fixes ---
+# --- Enhanced Spotify Downloader API for Render ---
 from flask import Flask, request, jsonify, send_file, after_this_request
 from flask_cors import CORS
 import spotipy
@@ -25,13 +25,21 @@ app = Flask(__name__)
 CORS(app)
 BRANDING_PREFIX = "VibeDownloader - "
 
-# --- Logging ---
-logging.basicConfig(level=logging.WARNING)
-app.logger.setLevel(logging.WARNING)
+# --- Enhanced Logging ---
+logging.basicConfig(level=logging.INFO)
+app.logger.setLevel(logging.INFO)
 
 # --- Spotify Configuration ---
 SPOTIFY_CLIENT_ID = os.getenv('SPOTIFY_CLIENT_ID', '8c4adcd1cebc42eda32054be38a2501f')
 SPOTIFY_CLIENT_SECRET = os.getenv('SPOTIFY_CLIENT_SECRET', 'de62ea9158714e1ba0c80fd325d21758')
+
+# --- User agents for anti-blocking ---
+USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0'
+]
 
 # --- Initialize Spotify Client ---
 def init_spotify():
@@ -42,26 +50,20 @@ def init_spotify():
                 client_secret=SPOTIFY_CLIENT_SECRET
             )
             return spotipy.Spotify(client_credentials_manager=client_credentials_manager)
-    except:
-        pass
+    except Exception as e:
+        app.logger.error(f"Spotify initialization failed: {e}")
     return None
 
 sp = init_spotify()
 
 class EnhancedDownloader:
     def __init__(self):
-        # Multiple user agents to rotate through
-        self.user_agents = [
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
-            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
-            'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        ]
+        self.lock = threading.Lock()
         
-        # Enhanced yt-dlp options with multiple fallbacks
-        self.ydl_base_opts = {
-            'format': 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best',
+    def get_ydl_opts(self, use_proxy=False):
+        """Get optimized yt-dlp options with anti-blocking measures"""
+        opts = {
+            'format': 'bestaudio[ext=m4a]/bestaudio/best',
             'noplaylist': True,
             'quiet': True,
             'no_warnings': True,
@@ -70,34 +72,40 @@ class EnhancedDownloader:
             'postprocessors': [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'mp3',
-                'preferredquality': '320'
+                'preferredquality': '192'  # Lower quality for better reliability
             }],
             'socket_timeout': 30,
             'retries': 3,
             'fragment_retries': 3,
             'ignoreerrors': True,
-            'concurrent_fragments': 2,
+            'concurrent_fragments': 1,
             'buffersize': 2048,
+            # Anti-blocking headers
+            'http_headers': {
+                'User-Agent': random.choice(USER_AGENTS),
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-us,en;q=0.5',
+                'Accept-Encoding': 'gzip, deflate',
+                'DNT': '1',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1'
+            },
+            # Geo-bypass options
             'geo_bypass': True,
             'geo_bypass_country': 'US',
-            'prefer_free_formats': True,
-            'youtube_include_dash_manifest': False,
-            'http_chunk_size': 10485760,  # 10MB chunks
+            # Additional options for stability
+            'sleep_interval': 1,
+            'max_sleep_interval': 2,
+            'writeinfojson': False,
+            'writesubtitles': False,
+            'writeautomaticsub': False,
         }
-        self.lock = threading.Lock()
         
-        # Alternative search engines/sources
-        self.search_engines = [
-            'ytsearch5:',  # YouTube search (5 results)
-            'ytsearch10:',  # YouTube search (10 results)
-        ]
-
-    def get_ydl_opts(self):
-        """Get yt-dlp options with random user agent"""
-        opts = self.ydl_base_opts.copy()
-        opts['http_headers'] = {
-            'User-Agent': random.choice(self.user_agents)
-        }
+        # Add proxy if specified
+        if use_proxy:
+            # You can add proxy configuration here if needed
+            pass
+            
         return opts
 
     def detect_spotify_link(self, url):
@@ -111,17 +119,18 @@ class EnhancedDownloader:
                 match = re.search(pattern, url.split('?')[0])
                 if match:
                     return {'type': link_type, 'id': match.group(1)}
-        except:
-            pass
+        except Exception as e:
+            app.logger.error(f"URL detection failed: {e}")
         return None
 
     def download_image(self, image_url):
         try:
-            headers = {'User-Agent': random.choice(self.user_agents)}
+            headers = {'User-Agent': random.choice(USER_AGENTS)}
             response = requests.get(image_url, timeout=10, stream=True, headers=headers)
             response.raise_for_status()
             return response.content
-        except:
+        except Exception as e:
+            app.logger.warning(f"Image download failed: {e}")
             return None
 
     def add_metadata(self, file_path, metadata):
@@ -146,8 +155,8 @@ class EnhancedDownloader:
             if metadata.get('album'):
                 audio_file['TALB'] = TALB(encoding=3, text=metadata['album'])
 
-            # Add cover image if available and reasonable size
-            if metadata.get('cover_image_data') and len(metadata['cover_image_data']) < 500000:
+            # Add cover image (smaller size for faster processing)
+            if metadata.get('cover_image_data') and len(metadata['cover_image_data']) < 300000:
                 audio_file['APIC'] = APIC(
                     encoding=3,
                     mime='image/jpeg',
@@ -159,75 +168,78 @@ class EnhancedDownloader:
             audio_file.save(v2_version=3)
             return True
         except Exception as e:
-            app.logger.error(f"Metadata error: {e}")
+            app.logger.warning(f"Metadata addition failed: {e}")
             return False
 
-    def download_track_with_fallbacks(self, query, metadata, output_dir):
-        """Try multiple approaches to download a track"""
-        safe_title = re.sub(r'[<>:"/\\|?*]', '_', f"{metadata['artist']} - {metadata['title']}")
-        safe_title = safe_title[:150]
-        
-        # Try different search queries
+    def search_alternative_sources(self, query):
+        """Search multiple sources for better reliability"""
         search_queries = [
-            f"{metadata['artist']} - {metadata['title']}",
-            f"{metadata['artist']} {metadata['title']}",
-            f"{metadata['title']} {metadata['artist']}",
-            f"{metadata['artist']} {metadata['title']} official",
-            f"{metadata['artist']} {metadata['title']} audio",
-            f"{metadata['title']} - {metadata['artist']}",
+            f"ytsearch1:{query}",
+            f"ytsearch1:{query} official",
+            f"ytsearch1:{query} audio",
+            f"ytsearch1:{query} song",
         ]
         
-        for attempt, search_query in enumerate(search_queries, 1):
-            app.logger.info(f"Download attempt {attempt} for '{search_query}'")
-            
-            for search_engine in self.search_engines:
-                try:
-                    ydl_opts = self.get_ydl_opts()
-                    ydl_opts['outtmpl'] = os.path.join(output_dir, f"{safe_title}_attempt_{attempt}.%(ext)s")
-                    
-                    with self.lock:
-                        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                            full_query = f"{search_engine}{search_query}"
-                            app.logger.info(f"Trying: {full_query}")
-                            
-                            # Extract info first to check availability
-                            info = ydl.extract_info(full_query, download=False)
-                            if info and 'entries' in info and info['entries']:
-                                # Download the first available entry
-                                ydl.download([full_query])
-                                
-                                # Find the downloaded file
-                                for file in os.listdir(output_dir):
-                                    if file.endswith('.mp3') and f"attempt_{attempt}" in file:
-                                        downloaded_file = os.path.join(output_dir, file)
-                                        
-                                        # Rename to final name
-                                        final_file = os.path.join(output_dir, f"{safe_title}.mp3")
-                                        if os.path.exists(downloaded_file):
-                                            shutil.move(downloaded_file, final_file)
-                                            
-                                            # Add metadata
-                                            self.add_metadata(final_file, metadata)
-                                            app.logger.info(f"Successfully downloaded: {search_query}")
-                                            return final_file
-                                        
-                except Exception as e:
-                    app.logger.error(f"yt-dlp download error: {e}")
-                    continue
-                    
-                # Small delay between attempts
-                time.sleep(1)
+        # Alternative search engines (if available)
+        alt_queries = [
+            f"ytsearch1:{query}",
+            # Add more search engines if needed
+        ]
         
-        app.logger.error(f"All download attempts failed for: {query}")
-        return None
+        return search_queries + alt_queries
 
-    def download_track(self, query, metadata, output_dir):
-        """Main download method with enhanced error handling"""
-        try:
-            return self.download_track_with_fallbacks(query, metadata, output_dir)
-        except Exception as e:
-            app.logger.error(f"Download failed for track {metadata.get('title', 'unknown')}: {e}")
-            return None
+    def download_track(self, query, metadata, output_dir, max_attempts=3):
+        """Enhanced download with multiple fallback strategies"""
+        safe_title = re.sub(r'[<>:"/\\|?*]', '_', f"{metadata['artist']} - {metadata['title']}")
+        safe_title = safe_title[:100]  # Shorter for compatibility
+
+        for attempt in range(max_attempts):
+            try:
+                app.logger.info(f"Download attempt {attempt + 1} for: {query}")
+                
+                # Try different yt-dlp configurations
+                ydl_opts = self.get_ydl_opts(use_proxy=(attempt > 0))
+                ydl_opts['outtmpl'] = os.path.join(output_dir, f"{safe_title}.%(ext)s")
+                
+                # Get search queries with fallbacks
+                search_queries = self.search_alternative_sources(query)
+                
+                with self.lock:
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        for search_query in search_queries:
+                            try:
+                                app.logger.info(f"Trying search: {search_query}")
+                                ydl.extract_info(search_query, download=True)
+                                break
+                            except Exception as search_error:
+                                app.logger.warning(f"Search failed: {search_error}")
+                                continue
+                        else:
+                            raise Exception("All search queries failed")
+
+                # Find downloaded file
+                expected_file = os.path.join(output_dir, f"{safe_title}.mp3")
+                if not os.path.exists(expected_file):
+                    # Look for any mp3 file
+                    mp3_files = [f for f in os.listdir(output_dir) if f.endswith('.mp3')]
+                    if mp3_files:
+                        expected_file = os.path.join(output_dir, mp3_files[0])
+
+                if os.path.exists(expected_file):
+                    app.logger.info(f"Successfully downloaded: {expected_file}")
+                    self.add_metadata(expected_file, metadata)
+                    return expected_file
+                else:
+                    raise Exception("Downloaded file not found")
+
+            except Exception as e:
+                app.logger.error(f"Download attempt {attempt + 1} failed: {e}")
+                if attempt < max_attempts - 1:
+                    time.sleep(2 ** attempt)  # Exponential backoff
+                else:
+                    app.logger.error(f"All download attempts failed for: {query}")
+
+        return None
 
     def get_track_info(self, track_id):
         if not sp:
@@ -243,7 +255,7 @@ class EnhancedDownloader:
                 'track_number': track['track_number']
             }
         except Exception as e:
-            app.logger.error(f"Error getting track info: {e}")
+            app.logger.error(f"Failed to get track info: {e}")
             return None
 
     def get_album_info(self, album_id):
@@ -251,7 +263,7 @@ class EnhancedDownloader:
             return None
         try:
             album = sp.album(album_id)
-            tracks = sp.album_tracks(album_id, limit=50)
+            tracks = sp.album_tracks(album_id, limit=20)  # Reduced limit
             return {
                 'id': album['id'],
                 'name': album['name'],
@@ -264,10 +276,10 @@ class EnhancedDownloader:
                     'album': album['name'],
                     'images': album['images'],
                     'track_number': track['track_number']
-                } for track in tracks['items'][:20]]
+                } for track in tracks['items']]
             }
         except Exception as e:
-            app.logger.error(f"Error getting album info: {e}")
+            app.logger.error(f"Failed to get album info: {e}")
             return None
 
     def get_playlist_info(self, playlist_id):
@@ -275,7 +287,7 @@ class EnhancedDownloader:
             return None
         try:
             playlist = sp.playlist(playlist_id)
-            tracks = sp.playlist_tracks(playlist_id, limit=50)
+            tracks = sp.playlist_tracks(playlist_id, limit=20)  # Reduced limit
             return {
                 'id': playlist['id'],
                 'name': playlist['name'],
@@ -287,23 +299,21 @@ class EnhancedDownloader:
                     'album': item['track']['album']['name'],
                     'images': item['track']['album']['images'],
                     'track_number': item['track']['track_number']
-                } for item in tracks['items'][:20] if item['track'] and item['track']['id']]
+                } for item in tracks['items'] if item['track'] and item['track']['id']]
             }
         except Exception as e:
-            app.logger.error(f"Error getting playlist info: {e}")
+            app.logger.error(f"Failed to get playlist info: {e}")
             return None
 
-# Initialize downloader
 downloader = EnhancedDownloader()
 
 # --- API Endpoints ---
 @app.route('/')
 def home():
     return jsonify({
-        'message': 'VibeDownloader API - Enhanced',
+        'message': 'VibeDownloader API - Enhanced for Render',
         'status': 'ok',
-        'spotify_available': sp is not None,
-        'version': '2.0'
+        'spotify_available': sp is not None
     })
 
 @app.route('/health')
@@ -317,7 +327,7 @@ def download():
         return jsonify({'error': 'URL required'}), 400
 
     if not sp:
-        return jsonify({'error': 'Spotify unavailable'}), 503
+        return jsonify({'error': 'Spotify service unavailable'}), 503
 
     link_info = downloader.detect_spotify_link(url)
     if not link_info:
@@ -338,7 +348,7 @@ def download():
                 'artists': track_info['artists'],
                 'album': track_info['album'],
                 'thumbnail': track_info['images'][0]['url'] if track_info['images'] else None,
-                'download_url': f"{base_url}/download/stream/{track_info['id']}"
+                'download_url': f"{base_url}/stream/{track_info['id']}"
             })
 
         elif content_type in ['album', 'playlist']:
@@ -355,21 +365,21 @@ def download():
                 'tracks': [{
                     'title': track['name'],
                     'artists': track['artists'],
-                    'download_url': f"{base_url}/download/stream/{track['id']}"
+                    'download_url': f"{base_url}/stream/{track['id']}"
                 } for track in item_info['tracks']],
-                'zip_url': f"{base_url}/download/zip/{content_type}/{spotify_id}"
+                'zip_url': f"{base_url}/zip/{content_type}/{spotify_id}"
             })
 
     except Exception as e:
         app.logger.error(f"Download endpoint error: {e}")
         return jsonify({'error': 'Server error'}), 500
 
-@app.route('/download/stream/<track_id>')
+@app.route('/stream/<track_id>')
 def stream_track(track_id):
     temp_dir = None
     try:
         temp_dir = tempfile.mkdtemp()
-        app.logger.info(f"Starting download for track {track_id}")
+        app.logger.info(f"Starting download for track: {track_id}")
 
         track_info = downloader.get_track_info(track_id)
         if not track_info:
@@ -381,18 +391,28 @@ def stream_track(track_id):
             'album': track_info['album']
         }
 
-        # Add cover image for single track downloads
+        # Add cover image for single tracks
         if track_info.get('images'):
             metadata['cover_image_data'] = downloader.download_image(track_info['images'][0]['url'])
 
-        query = f"{metadata['artist']} - {metadata['title']}"
-        app.logger.info(f"Downloading: {query}")
-        
-        downloaded_file = downloader.download_track(query, metadata, temp_dir)
+        # Enhanced query with multiple variations
+        queries = [
+            f"{metadata['artist']} - {metadata['title']}",
+            f"{metadata['artist']} {metadata['title']}",
+            f"{metadata['title']} {metadata['artist']}",
+            f"{metadata['title']}"
+        ]
 
-        if not downloaded_file or not os.path.exists(downloaded_file):
+        downloaded_file = None
+        for query in queries:
+            app.logger.info(f"Trying query: {query}")
+            downloaded_file = downloader.download_track(query, metadata, temp_dir)
+            if downloaded_file:
+                break
+
+        if not downloaded_file:
             app.logger.error(f"Download failed for track {track_id}")
-            return jsonify({'error': 'Download failed - track may be unavailable'}), 500
+            return jsonify({'error': 'Download failed - content may be restricted'}), 500
 
         filename = f"{BRANDING_PREFIX}{metadata['artist']} - {metadata['title']}.mp3"
         filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
@@ -402,11 +422,10 @@ def stream_track(track_id):
             try:
                 if temp_dir and os.path.exists(temp_dir):
                     shutil.rmtree(temp_dir)
-            except:
-                pass
+            except Exception as e:
+                app.logger.warning(f"Cleanup failed: {e}")
             return response
 
-        app.logger.info(f"Successfully processed track {track_id}")
         return send_file(
             downloaded_file,
             as_attachment=True,
@@ -415,12 +434,12 @@ def stream_track(track_id):
         )
 
     except Exception as e:
-        app.logger.error(f"Stream track error: {e}")
+        app.logger.error(f"Stream endpoint error: {e}")
         if temp_dir:
             shutil.rmtree(temp_dir, ignore_errors=True)
         return jsonify({'error': 'Server error'}), 500
 
-@app.route('/download/zip/<item_type>/<item_id>')
+@app.route('/zip/<item_type>/<item_id>')
 def download_zip(item_type, item_id):
     if item_type not in ['album', 'playlist']:
         return jsonify({'error': 'Invalid type'}), 400
@@ -428,21 +447,22 @@ def download_zip(item_type, item_id):
     temp_dir = None
     try:
         temp_dir = tempfile.mkdtemp()
-        app.logger.info(f"Starting ZIP download for {item_type} {item_id}")
+        app.logger.info(f"Starting ZIP download for {item_type}: {item_id}")
 
         info_func = downloader.get_album_info if item_type == 'album' else downloader.get_playlist_info
         item_info = info_func(item_id)
         if not item_info:
             return jsonify({'error': f'{item_type} not found'}), 404
 
-        # Create in-memory ZIP
         zip_buffer = io.BytesIO()
         successful_downloads = 0
 
         with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-            for i, track in enumerate(item_info['tracks'][:10]):  # Limit to 10 tracks
+            # Limit tracks for free tier
+            max_tracks = 5 if item_type == 'playlist' else 10
+            for i, track in enumerate(item_info['tracks'][:max_tracks]):
                 try:
-                    app.logger.info(f"Processing track {i+1}/10: {track['name']}")
+                    app.logger.info(f"Processing track {i+1}/{min(len(item_info['tracks']), max_tracks)}: {track['name']}")
                     
                     metadata = {
                         'title': track['name'],
@@ -450,47 +470,57 @@ def download_zip(item_type, item_id):
                         'album': track['album']
                     }
 
-                    query = f"{metadata['artist']} - {metadata['title']}"
-                    downloaded_file = downloader.download_track(query, metadata, temp_dir)
+                    # Try multiple query variations
+                    queries = [
+                        f"{metadata['artist']} - {metadata['title']}",
+                        f"{metadata['artist']} {metadata['title']}",
+                        f"{metadata['title']}"
+                    ]
+
+                    downloaded_file = None
+                    for query in queries:
+                        downloaded_file = downloader.download_track(query, metadata, temp_dir)
+                        if downloaded_file:
+                            break
 
                     if downloaded_file and os.path.exists(downloaded_file):
                         zip_filename = f"{i+1:02d} - {metadata['artist']} - {metadata['title']}.mp3"
                         zip_filename = re.sub(r'[<>:"/\\|?*]', '_', zip_filename)
                         zip_file.write(downloaded_file, zip_filename)
-                        os.remove(downloaded_file)  # Clean up immediately
+                        os.remove(downloaded_file)
                         successful_downloads += 1
-                        app.logger.info(f"Successfully added track {i+1}")
+                        app.logger.info(f"Successfully added to ZIP: {zip_filename}")
                     else:
-                        app.logger.warning(f"Failed to download track {i+1}: {track['name']}")
-                        
-                except Exception as e:
-                    app.logger.error(f"Error processing track {i+1}: {e}")
+                        app.logger.warning(f"Failed to download: {track['name']}")
+
+                except Exception as track_error:
+                    app.logger.error(f"Error processing track {track['name']}: {track_error}")
                     continue
 
         if successful_downloads == 0:
             return jsonify({'error': 'No tracks could be downloaded'}), 500
 
         zip_buffer.seek(0)
+        app.logger.info(f"ZIP created successfully with {successful_downloads} tracks")
 
         @after_this_request
         def cleanup(response):
             try:
                 if temp_dir:
                     shutil.rmtree(temp_dir)
-            except:
-                pass
+            except Exception as e:
+                app.logger.warning(f"Cleanup failed: {e}")
             return response
 
-        app.logger.info(f"ZIP created with {successful_downloads} tracks")
         return send_file(
             zip_buffer,
             as_attachment=True,
-            download_name=f"{item_info['name']}.zip",
+            download_name=f"{BRANDING_PREFIX}{item_info['name']}.zip",
             mimetype='application/zip'
         )
 
     except Exception as e:
-        app.logger.error(f"ZIP download error: {e}")
+        app.logger.error(f"ZIP endpoint error: {e}")
         if temp_dir:
             shutil.rmtree(temp_dir, ignore_errors=True)
         return jsonify({'error': 'ZIP creation failed'}), 500
@@ -498,11 +528,16 @@ def download_zip(item_type, item_id):
 # --- Error Handlers ---
 @app.errorhandler(404)
 def not_found(error):
-    return jsonify({'error': 'Not found'}), 404
+    return jsonify({'error': 'Endpoint not found'}), 404
 
 @app.errorhandler(500)
 def internal_error(error):
-    return jsonify({'error': 'Server error'}), 500
+    app.logger.error(f"Internal server error: {error}")
+    return jsonify({'error': 'Internal server error'}), 500
+
+@app.errorhandler(503)
+def service_unavailable(error):
+    return jsonify({'error': 'Service temporarily unavailable'}), 503
 
 # --- Production Entry Point ---
 if __name__ == '__main__':
